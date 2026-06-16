@@ -1,1 +1,42 @@
+name: Build and Deploy .NET 8 App to Azure Web App
+
+on:
+  push:
+    branches:
+      - Dev
+
+env:
+  BUILD_CONFIGURATION: Release
+  AZURE_WEBAPP_NAME: myapi-app-ramu
+
+jobs:
+
+# ================= BUILD JOB =================
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore Packages
+      run: dotnet restore
+
+    - name: Build Project
+      run: dotnet build --configuration $env:BUILD_CONFIGURATION
+
+    - name: Publish Project
+      run: dotnet publish --configuration $env:BUILD_CONFIGURATION --output ./publish
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: drop
+        path: ./publish
+
 
