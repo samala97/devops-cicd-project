@@ -1,36 +1,112 @@
-# This is a basic workflow to help you get started with Actions
+name: Build and Deploy .NET 8 to IIS
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches:
+      - Dev
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
+
+# ================= BUILD JOB =================
   build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+    name: Build .NET App
+    runs-on: windows-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    env:
+      buildConfiguration: Release
+      artifactName: drop
+
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+    - name: Setup .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.x'
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
-        run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+    - name: Restore Packages
+      run: dotnet restore
+
+    - name: Build Project
+      run: dotnet build --configuration $env:buildConfiguration
+
+    - name: Publish Project
+      run: |
+        dotnet publish --configuration $env:buildConfiguration `
+        --output ./publish
+
+    - name: Zip Published Output
+      run: |
+        Compress-Archive -Path ./publish/* -DestinationPath WebApp.zip
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: drop
+        path: WebApp.zip
+
+
+# ================= DEPLOY JOB =================
+  deploy:
+    name: Deploy to IIS
+    runs-on: self-hosted   # ⚠️ Your VM runner
+    needs: build
+
+    steps:
+    - name: Download Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: drop
+        path: .
+
+    # ✅ Create IIS Website + App Pool
+    - name: Setup IIS Website
+      run: |
+        Import-Module WebAdministration
+
+        if (!(Test-Path "IIS:\Sites\MyIISWebsite")) {
+            New-Website -Name "MyIISWebsite" `
+              -Port 80 `
+              -PhysicalPath "C:\inetpub\wwwroot\MyIISWebsite" `
+              -ApplicationPool "MyIISWebsite"
+        }
+
+        if (!(Test-Path "IIS:\AppPools\MyIISWebsite")) {
+            New-WebAppPool -Name "MyIISWebsite"
+        }
+
+    # ✅ Create Application
+    - name: Create IIS Application
+      run: |
+        Import-Module WebAdministration
+
+        if (!(Test-Path "IIS:\Sites\MyIISWebsite\Rishi12")) {
+            New-WebApplication `
+              -Site "MyIISWebsite" `
+              -Name "Rishi12" `
+              -PhysicalPath "C:\inetpub\wwwroot\Rishi12" `
+              -ApplicationPool "MyIISWebsite"
+        }
+
+    # ✅ Stop Website
+    - name: Stop IIS Website
+      run: |
+        Stop-Website -Name "MyIISWebsite"
+
+    # ✅ Deploy ZIP
+    - name: Deploy Application
+      run: |
+        $zipPath = "WebApp.zip"
+        $destination = "C:\inetpub\wwwroot\Rishi12"
+
+        if (Test-Path $destination) {
+            Remove-Item "$destination\*" -Recurse -Force
+        }
+
+        Expand-Archive -Path $zipPath -DestinationPath $destination -Force
+
+    # ✅ Start Website
+    - name: Start IIS Website
+      run: |
+        Start-Website -Name "MyIISWebsite"
