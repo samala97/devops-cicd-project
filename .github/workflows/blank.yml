@@ -1,20 +1,16 @@
-name: Build and Deploy .NET 8 to IIS
+name: Build and Deploy .NET 8 to IIS (Ubuntu)
 
 on:
-  push:
-    branches:
-      - Dev
+  workflow_dispatch:
 
 jobs:
 
-# ================= BUILD JOB =================
+# ================= BUILD =================
   build:
-    name: Build .NET App
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     env:
       buildConfiguration: Release
-      artifactName: drop
 
     steps:
     - name: Checkout Code
@@ -25,20 +21,19 @@ jobs:
       with:
         dotnet-version: '8.x'
 
-    - name: Restore Packages
+    - name: Restore
       run: dotnet restore
 
-    - name: Build Project
-      run: dotnet build --configuration $env:buildConfiguration
+    - name: Build
+      run: dotnet build --configuration $buildConfiguration
 
-    - name: Publish Project
-      run: |
-        dotnet publish --configuration $env:buildConfiguration `
-        --output ./publish
+    - name: Publish
+      run: dotnet publish --configuration $buildConfiguration -o publish
 
-    - name: Zip Published Output
+    - name: Zip Artifact
       run: |
-        Compress-Archive -Path ./publish/* -DestinationPath WebApp.zip
+        cd publish
+        zip -r ../WebApp.zip .
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
@@ -47,10 +42,9 @@ jobs:
         path: WebApp.zip
 
 
-# ================= DEPLOY JOB =================
+# ================= DEPLOY =================
   deploy:
-    name: Deploy to IIS
-    runs-on: self-hosted   # ⚠️ Your VM runner
+    runs-on: ubuntu-latest
     needs: build
 
     steps:
@@ -58,55 +52,70 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: drop
-        path: .
 
-    # ✅ Create IIS Website + App Pool
-    - name: Setup IIS Website
+    # ✅ Install PowerShell on Ubuntu
+    - name: Install PowerShell
       run: |
-        Import-Module WebAdministration
+        sudo apt-get update
+        sudo apt-get install -y powershell
 
-        if (!(Test-Path "IIS:\Sites\MyIISWebsite")) {
-            New-Website -Name "MyIISWebsite" `
-              -Port 80 `
-              -PhysicalPath "C:\inetpub\wwwroot\MyIISWebsite" `
-              -ApplicationPool "MyIISWebsite"
+    # ✅ Deploy to IIS using WinRM
+    - name: Deploy to IIS VM
+      shell: pwsh
+      env:
+        VM_IP: ${{ secrets.VM_IP }}
+        USERNAME: ${{ secrets.VM_USERNAME }}
+        PASSWORD: ${{ secrets.VM_PASSWORD }}
+      run: |
+
+        $secpasswd = ConvertTo-SecureString $env:PASSWORD -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential ($env:USERNAME, $secpasswd)
+
+        $session = New-PSSession -ComputerName $env:VM_IP -Credential $cred -Authentication Basic -Port 5985
+
+        # Copy ZIP to VM
+        Copy-Item -Path "WebApp.zip" -Destination "C:\temp\WebApp.zip" -ToSession $session
+
+        Invoke-Command -Session $session -ScriptBlock {
+
+            Import-Module WebAdministration
+
+            # Create App Pool
+            if (!(Test-Path "IIS:\AppPools\MyIISWebsite")) {
+                New-WebAppPool -Name "MyIISWebsite"
+            }
+
+            # Create Website
+            if (!(Test-Path "IIS:\Sites\MyIISWebsite")) {
+                New-Website -Name "MyIISWebsite" `
+                  -Port 80 `
+                  -PhysicalPath "C:\inetpub\wwwroot\MyIISWebsite" `
+                  -ApplicationPool "MyIISWebsite"
+            }
+
+            # Create Application
+            if (!(Test-Path "IIS:\Sites\MyIISWebsite\Rishi12")) {
+                New-WebApplication `
+                  -Site "MyIISWebsite" `
+                  -Name "Rishi12" `
+                  -PhysicalPath "C:\inetpub\wwwroot\Rishi12" `
+                  -ApplicationPool "MyIISWebsite"
+            }
+
+            # Stop Site
+            Stop-Website -Name "MyIISWebsite"
+
+            # Deploy
+            $dest = "C:\inetpub\wwwroot\Rishi12"
+
+            if (Test-Path $dest) {
+                Remove-Item "$dest\*" -Recurse -Force
+            }
+
+            Expand-Archive -Path "C:\temp\WebApp.zip" -DestinationPath $dest -Force
+
+            # Start Site
+            Start-Website -Name "MyIISWebsite"
         }
 
-        if (!(Test-Path "IIS:\AppPools\MyIISWebsite")) {
-            New-WebAppPool -Name "MyIISWebsite"
-        }
-
-    # ✅ Create Application
-    - name: Create IIS Application
-      run: |
-        Import-Module WebAdministration
-
-        if (!(Test-Path "IIS:\Sites\MyIISWebsite\Rishi12")) {
-            New-WebApplication `
-              -Site "MyIISWebsite" `
-              -Name "Rishi12" `
-              -PhysicalPath "C:\inetpub\wwwroot\Rishi12" `
-              -ApplicationPool "MyIISWebsite"
-        }
-
-    # ✅ Stop Website
-    - name: Stop IIS Website
-      run: |
-        Stop-Website -Name "MyIISWebsite"
-
-    # ✅ Deploy ZIP
-    - name: Deploy Application
-      run: |
-        $zipPath = "WebApp.zip"
-        $destination = "C:\inetpub\wwwroot\Rishi12"
-
-        if (Test-Path $destination) {
-            Remove-Item "$destination\*" -Recurse -Force
-        }
-
-        Expand-Archive -Path $zipPath -DestinationPath $destination -Force
-
-    # ✅ Start Website
-    - name: Start IIS Website
-      run: |
-        Start-Website -Name "MyIISWebsite"
+        Remove-PSSession $session
